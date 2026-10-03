@@ -54,6 +54,24 @@
 
 `skillsService` 按目录扫描发现 `.agents/skills/`，无注册清单，因此这是纯新增，不碰装配代码。
 
+## 版本体系
+
+本 fork **不沿用上游的 3.x 编号**，走独立的 `1.y.z`：
+
+- `y` = 对齐上游的同步批次（同步一次上游 main 递增一次）
+- `z` = 本 fork 自身迭代
+- 首个版本从 `1.0.0` 起步，与上游 `3.14.x` 完全脱钩
+
+**为什么**：两边同号会让「这个 3.14.7 是谁的构建」分不清——上游发 3.14.8 时我们无法跟着发同号而不产生歧义，而不同号又看不出我们基于哪个上游版本。拆成两条线后，版本号只表达「我们走到哪了」，上游位置由 git 历史和本文件登记的差异决定。
+
+沿用的既有约定：
+
+- 预发布用日期式后缀：`1.0.0-audit.20260922`，同日重复构建自动追加 `.2` / `.3`；
+- 版本号**不编码**上游 commit sha，对应关系记在本文件和各次 release 说明里；
+- workflow 的版本校验正则本就是通用 semver，无需为 1.x 改动。
+
+`package.json` 是版本号的唯一来源；`release.yml` 的输入提示与注释已同步为 1.y.z 语义。
+
 ## 同步上游
 
 ```bash
@@ -71,6 +89,12 @@ git checkout main && git merge --no-ff sync/upstream-<date>
 
 ## 发版
 
-本 fork 的 `main` 是产品线发版源。版本号沿用上游 `3.x` 体系还是另起一套，尚未决定；
-在决定前，发版前请确认 `packages/desktop/package.json` 与 `package.json` 的版本来源，
-不要默认沿用上游号。
+本 fork 的 `main` 是产品线发版源，版本走上面的 `1.y.z` 体系。发版走仓库自带的
+`release.yml`（GitHub Actions，`workflow_dispatch` 触发）：在 `yachen4ever/ZCodium`
+上手动跑，传版本号、是否预发布、是否构建产物。CI 会在 5 个桌面平台出包并合并 sha256，
+全部上传成功才把 draft release 转正——这套流程本来就是为「产物齐了才发布」设计的，
+沿用即可。
+
+> 注意：`packages/desktop` 的 `build` 脚本**不含 electron-builder**，本地想出包要走
+> `pnpm bundle:desktop -- --os win --arch x64`，不能用 `pnpm build` 代替。
+
