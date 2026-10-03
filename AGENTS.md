@@ -34,6 +34,7 @@
 - `apps/zcode-cli`：Agent CLI 与运行时。
 - `CONTEXT.md`：插件商店领域词汇；修改相关 UI 前阅读。
 - `DESIGN.md`：UI 设计规范；修改 UI 前阅读。
+- `docs/fork-delta.md`：**本 fork 与上游 ZCodium 的差异台账**。任何让本仓库与上游分叉的改动必须先在此登记（改了什么、为什么、对应哪个上游 PR、同步状态）；同步上游或改动这些差异前先读它。
 
 ## 实现与验证
 
