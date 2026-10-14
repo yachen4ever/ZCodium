@@ -8,15 +8,29 @@
 - 本仓库是 `ZCodium-project/ZCodium` 的 fork，上游地址 `git@github.com:ZCodium-project/ZCodium.git`。
 - `yachen4ever` 是上游的**协作者**（具备写权限，可直接推分支提 PR），但不推任何修改到上游 `main`——**一律走 PR**。
 - 分工基线：**我们只负责提 PR，review 与合并统一由上游维护者（@SudoUserReal）承担**。`.github/CODEOWNERS` 只有他一人，这是有意为之，不是疏漏。
-- 本 fork 的 `main` = 上游 `main` + 下表登记的差异。它是我们自己的产品线，发版也从这里出。
+- 本 fork 的 `main` = 上游 `main` + 下表登记的差异，作为**贡献线的集成分支**：差异先落这里验证，再以 PR 回馈上游。
+  2026-10-11 起私人产品线独立为 `yachen4ever/yazcode`（26.x 线），本 fork 不再承担日常发版——release 页目前仅有
+  一个未转正的 `v1.0.0` draft（2026-10-03）。
 
 ## 差异清单
 
 | # | 差异 | 上游 PR | 状态 |
 |---|---|---|---|
-| 1 | 移除智谱套餐体系，Provider 拉平为普通预设 | [#16](https://github.com/ZCodium-project/ZCodium/pull/16) | 待 review |
-| 2 | 许可台账漂移闸门 + 清理 9 条 stale override | [#21](https://github.com/ZCodium-project/ZCodium/pull/21) | 待 review |
-| 3 | office 四技能（docx / xlsx / pptx / pdf） | [#22](https://github.com/ZCodium-project/ZCodium/pull/22) | 待 review（堆叠在 #21 上） |
+| 1 | 移除智谱套餐体系，Provider 拉平为普通预设 | [#16](https://github.com/ZCodium-project/ZCodium/pull/16) | 已合入上游（2026-10-05）。注意：上游后续以 [#25](https://github.com/ZCodium-project/ZCodium/pull/25) 恢复了 Z.ai / BigModel Coding Plan 的 API-Key 预设模板，与本 fork 立场相悖未跟随，同步时需重新表态 |
+| 2 | 许可台账漂移闸门 + 清理 9 条 stale override | [#21](https://github.com/ZCodium-project/ZCodium/pull/21) | 已合入上游（2026-10-05）；AND 混合表达式按最严成员分类的后续修复亦已合入（[#33](https://github.com/ZCodium-project/ZCodium/pull/33)） |
+| 3 | office 四技能（docx / xlsx / pptx / pdf） | [#22](https://github.com/ZCodium-project/ZCodium/pull/22) | #22 已关闭；由 [#24](https://github.com/ZCodium-project/ZCodium/pull/24) 替代合入（2026-10-05），但上游只收了 docx / xlsx——**pptx / pdf 仍为本 fork 独有** |
+
+## 上游同步状态（2026-10-14 核实）
+
+- **已合入上游的本 fork 贡献**：#16 / #21 / #23 / #24 / #31 / #33 / #35 / #37 / #41 全部 squash 合入；
+  在途仅剩 [#40](https://github.com/ZCodium-project/ZCodium/pull/40)（对话动作行常驻、用户消息时间戳、回复速度展示）。
+- **上游已整体再基线**：2026-10-11 维护者以 [#43](https://github.com/ZCodium-project/ZCodium/pull/43) 把 main 再基线到
+  zai-org v3.15.1（遥测剥离，约 1.17 万文件量级，带入 UI Plugin / gen-ui 等新面），10-12 又以
+  [#45](https://github.com/ZCodium-project/ZCodium/pull/45) 修复 release 构建与打包版启动/登录链路。
+  **本 fork main 仍基于旧基线，尚未跟进这次再基线**——下次同步的主要工作量。
+- 上游另有本 fork 之外的变化：#15 OrcaRouter、#27 linked-issue 门禁、#29 Codex hooks 兼容，
+  以及 #19 数据根归属文件 + 决策式迁移（替代了本 fork 被关闭的 #12/#13 方案，两侧迁移方式已定型分歧）。
+- 两侧 `package.json` 均为 `1.0.0`（上游经 #41 采纳了同一套 1.y.z 体系）。
 
 ### 1. 去智谱化（`feat!: 移除智谱套餐体系`）
 
@@ -44,7 +58,7 @@
 （正是当初「移除全部监控与遥测」时漏删的）会让生成器 fail-closed 抛 `Stale npm notice override`，
 即**上游 main 上根本跑不出新的声明**。
 
-> 依赖关系：#3 堆叠在 #2 上，因为 #2 未合入前上游台账无法重生成。
+> 依赖关系：#3 原堆叠在 #2 上（#2 未合入前上游台账无法重生成）；两者均已合入，依赖解除。
 
 ### 3. office 四技能
 
@@ -71,6 +85,8 @@
 - workflow 的版本校验正则本就是通用 semver，无需为 1.x 改动。
 
 `package.json` 是版本号的唯一来源；`release.yml` 的输入提示与注释已同步为 1.y.z 语义。
+
+> 2026-10-11 上游经 [#41](https://github.com/ZCodium-project/ZCodium/pull/41) 采纳了同一套体系，两侧 `y`=同步上游批次的语义已一致。
 
 ## 同步上游
 
