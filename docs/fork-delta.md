@@ -27,7 +27,8 @@
 - **上游已整体再基线**：2026-10-11 维护者以 [#43](https://github.com/ZCodium-project/ZCodium/pull/43) 把 main 再基线到
   zai-org v3.15.1（遥测剥离，约 1.17 万文件量级，带入 UI Plugin / gen-ui 等新面），10-12 又以
   [#45](https://github.com/ZCodium-project/ZCodium/pull/45) 修复 release 构建与打包版启动/登录链路。
-  **2026-10-14 同步完成**：main 重置到 upstream/main（e02e5909，含 #43 再基线与 #45），再移植 fork 独有差异
+  **2026-10-14 同步完成**：main 重置到 upstream/main（当日基线 e02e5909，含 #43 再基线与 #45；同日补入上游后续
+  #47/#49，基线推进至 3a71ce0c），再移植 fork 独有差异
   （本台账、pptx/pdf 技能及其 copied-components 登记，notices 由生成器重跑）。重置前的旧 main 留档于
   `backup/main-pre-sync-20261014` 分支。#25 恢复的 Coding Plan 预设模板**跟随上游**（激进去套餐立场由 yazcode 线保持；
   如需改变立场，后续单独 revert 再登记）。
