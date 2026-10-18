@@ -20,24 +20,22 @@
 | 2 | 许可台账漂移闸门 + 清理 9 条 stale override | [#21](https://github.com/ZCodium-project/ZCodium/pull/21) | 已合入上游（2026-10-05）；AND 混合表达式按最严成员分类的后续修复亦已合入（[#33](https://github.com/ZCodium-project/ZCodium/pull/33)） |
 | 3 | office 四技能（docx / xlsx / pptx / pdf） | [#22](https://github.com/ZCodium-project/ZCodium/pull/22) | #22 已关闭；由 [#24](https://github.com/ZCodium-project/ZCodium/pull/24) 替代合入（2026-10-05），但上游只收了 docx / xlsx——**pptx / pdf 仍为本 fork 独有**（2026-10-14 随同步移植到再基线后的基座） |
 
-## 上游同步状态（2026-10-18 核实）
+## 上游同步状态（2026-10-18 核实，#56 合入后更新）
 
-- **本 fork 已合入上游的贡献**：#16 / #21 / #23 / #24 / #31 / #33 / #35 / #37 / #40 / #41 / #57 / #58
-  全部 squash 合入（#40 于 2026-10-18 合入，速度双缺陷修复已在其中）；在途仅剩
-  [#56](https://github.com/ZCodium-project/ZCodium/pull/56)（services 测试脚本对齐 vitest）——维护者本地验证反馈
-  `--root ../..` 不改 Node 进程 cwd、两个用 `process.cwd()`/相对路径定位仓库文件的测试会挂，按其建议的
-  方案 2（测试改用 `import.meta.url` 定位仓库根）修复中。
+- **本 fork 已合入上游的贡献**：#16 / #21 / #23 / #24 / #31 / #33 / #35 / #37 / #40 / #41 / #56 / #57 / #58
+  全部 squash 合入——**在途清零**（#56 于 2026-10-18 合入，含 services 测试脚本对齐 vitest 与
+  agentProxyEnv / tasksDatabaseMigration 两测试的 cwd 无关化改造；速度双缺陷修复随 #40 在其中）。
 - **上游已整体再基线**：2026-10-11 维护者以 [#43](https://github.com/ZCodium-project/ZCodium/pull/43) 把 main 再基线到
   zai-org v3.15.1（遥测剥离，约 1.17 万文件量级，带入 UI Plugin / gen-ui 等新面），10-12 又以
   [#45](https://github.com/ZCodium-project/ZCodium/pull/45) 修复 release 构建与打包版启动/登录链路。
 - **同步轨迹**：2026-10-14 main 重置到 e02e5909（含 #43/#45），同日补入 #47/#49 至 3a71ce0c；
-  2026-10-18 再同步至 9cd5e0e4（上游吸收 #40/#57/#58/#60）。重置前的旧 main 留档于
+  2026-10-18 再同步至 9cd5e0e4（上游吸收 #40/#57/#58/#60）、#56 合入后至 192f9b8c。重置前的旧 main 留档于
   `backup/main-pre-sync-20261014` 分支。每次同步均重移植 fork 独有差异（本台账、pptx/pdf 技能及其
   copied-components 登记，notices 由生成器重跑）。#25 恢复的 Coding Plan 预设模板**跟随上游**（激进去套餐立场由
   yazcode 线保持；如需改变立场，后续单独 revert 再登记）。
-- 上游另有本 fork 之外的变化：#15 OrcaRouter、#27 linked-issue 门禁、#29 Codex hooks 兼容、
+- 上游另有本 fork 之外的变化：#15 OrcaRouter、#27 linked-issue 门禁、#29 Codex hooks 兼容（yazcode 已自含等价）、
   #19 数据根归属文件 + 决策式迁移（替代了本 fork 被关闭的 #12/#13 方案，两侧迁移方式已定型分歧）、
-  #47 强更门禁修复、#49 footer 登录入口移除（其暴露的测试破损已由本 fork #58 修复）。
+  #47 强更门禁禁用（yazcode 审计版本就是 stub）、#49 footer 登录入口移除（其暴露的测试破损已由本 fork #58 修复）。
 - 两侧 `package.json` 均走 1.y.z（上游经 #41 采纳；上游已发 v1.0.1）。
 
 ### 1. 去智谱化（`feat!: 移除智谱套餐体系`）
