@@ -300,5 +300,39 @@
     "provenance": "Bundled font name table identifies Hack 3.003 and retains Source Foundry, Bitstream Vera, and DejaVu license statements. The upstream v3.003 license is retained verbatim, including the DejaVu public-domain statement.",
     "importRevision": null,
     "sha256": "1f61bb7c790c59b4b0ecdf304628b94e42ae4c8020094a8c3da73381ab212623"
+  },
+  {
+    "id": "minimax-code pptx skill",
+    "referenceRevision": "564e9166d81f87b0b767b005e4779d4697b512be",
+    "source": "https://raw.githubusercontent.com/MiniMaxAI/minimax-code/564e9166d81f87b0b767b005e4779d4697b512be/LICENSE",
+    "file": "third-party/upstream/28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea.txt",
+    "sha256": "28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea",
+    "importRevision": "564e9166d81f87b0b767b005e4779d4697b512be",
+    "provenance": "Copied byte-for-byte from packages/local-runtime/assets/skills/pptx in the upstream repository; the import revision is verified against a local clone whose working tree is clean at that commit. Only a provenance notice was added to SKILL.md.",
+    "roots": [
+      ".agents/skills/pptx"
+    ],
+    "scope": "PowerPoint read/create/edit instructions, element map and preview writeback references, plus the bundled helper scripts. Includes the optional upstream .mavis-ppt-map.json sidecar protocol, which is inert in ZCode.",
+    "license": "MIT",
+    "modifiedFiles": [
+      ".agents/skills/pptx/SKILL.md"
+    ]
+  },
+  {
+    "id": "minimax-code pdf skill",
+    "referenceRevision": "564e9166d81f87b0b767b005e4779d4697b512be",
+    "source": "https://raw.githubusercontent.com/MiniMaxAI/minimax-code/564e9166d81f87b0b767b005e4779d4697b512be/LICENSE",
+    "file": "third-party/upstream/28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea.txt",
+    "sha256": "28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea",
+    "importRevision": "564e9166d81f87b0b767b005e4779d4697b512be",
+    "provenance": "Copied byte-for-byte from packages/local-runtime/assets/skills/pdf in the upstream repository; the import revision is verified against a local clone whose working tree is clean at that commit. Only a provenance notice was added to SKILL.md.",
+    "roots": [
+      ".agents/skills/pdf"
+    ],
+    "scope": "PDF generate/reformat/fill/read instructions, route guides, LaTeX and brand-guide templates, and the bundled Python helper scripts.",
+    "license": "MIT",
+    "modifiedFiles": [
+      ".agents/skills/pdf/SKILL.md"
+    ]
   }
 ]
