@@ -1,4 +1,6 @@
 import type { RefObject } from "react";
+import type { RemoteConnectionContext } from "@zcode/shared";
+import type { ComposerDraftHandoff } from "@/v4/composer/composerDraftWorkspaceTransfer.js";
 import type {
   ZCodeProvider,
   SessionCreateSource,
@@ -47,6 +49,7 @@ import type {
 } from "@/store/zcodeSessionStoreTypes.js";
 import type { TaskFindDialogProps } from "@/quickpick/TaskFindDialog.js";
 import type { AutomationsNavigationTab, OpenAutomationsMain } from "@/lib/taskNavigationHistory.js";
+import type { SidePaneFullViewController } from "@/side-pane-full-view/contract.js";
 
 export interface WorkspaceShellZCodeState {
   activeTaskId: WorkspaceZCodeUIState["activeTaskId"];
@@ -61,29 +64,94 @@ export interface WorkspaceShellZCodeState {
 }
 
 export interface CreateTaskOptions {
+  isCurrent?: () => boolean;
+  remoteProjectMembershipId?: string;
+  onComplete?: () => void;
+  onError?: (error: unknown) => void;
   /** 异步预填只能提交到解析 Skill 时的同一新任务目标。 */
   expectedWorkspaceKey?: string;
   provider?: ZCodeProvider;
+  projectId?: string | null;
+  draftId?: string;
+  taskGroupId?: string | null;
+  hostId?: string;
   groupedDraftPlacement?: GroupedDraftTaskPlacement;
   createSource?: SessionCreateSource;
   /** 新草稿输入框预填文本；只写草稿，不自动发送。 */
   initialPrompt?: string;
+  initialComposerDraft?: ComposerDraftHandoff;
   /** 与 initialPrompt canonical 前缀对应的结构化 mention；仅用于编辑器展示。 */
   initialPromptMention?: ComposerMentionPrefill;
   /** 新任务落在哪个 workspace；缺省取活动 workspace。 */
-  targetWorkspace?: { workspacePath: string; workspaceIdentity?: string };
+  targetWorkspace?: {
+    projectId?: string | null;
+    hostId?: string;
+    workspacePath: string;
+    workspaceIdentity?: string;
+  };
 }
 
 export type CreateTaskRequest = ZCodeProvider | CreateTaskOptions;
 
+export interface RemoteWorkspaceRecoveryStatus {
+  mode: "automatic" | "manual";
+  attempt?: number;
+  limit?: number;
+}
+
+export interface RemoteConnectionFeedbackOptions {
+  announceReusedConnection?: boolean;
+}
+
+export type DeviceAdditionResult =
+  | { kind: "connected"; sourceServerId: string | undefined }
+  | { kind: "cancelled"; background?: boolean };
+
+export interface DeviceAdditionReturnTarget {
+  kind: "connect-device" | "add-device";
+  isCurrent(): boolean;
+  onVisibilityChange?(visible: boolean): void;
+  canFinish?(result: DeviceAdditionResult): Promise<boolean>;
+  finish(result: DeviceAdditionResult): void | Promise<void>;
+}
+
+export interface RemoteConnectionOpenPreference {
+  returnTarget?: DeviceAdditionReturnTarget;
+  completion?: "device-management";
+  initialFailure?: {
+    code?: string;
+    message: string;
+    logs?: RemoteConnectionLogEntry[];
+    profileId?: string;
+    failedTarget?: import("@zcode/shared").SourceServerUpdateTarget;
+    resolvedWslTarget?: Required<Extract<RemoteTarget, { kind: "wsl" }>>;
+  };
+  preferredDirectoryPath?: string;
+  preferredWorkspaceTabId?: string;
+  preferredProjectEntryId?: string;
+  preferredTarget?: RemoteTarget;
+  preferredKind?: RemoteTarget["kind"];
+  preferredWslDistro?: string;
+  preferredSourceServerId?: string;
+  preferredProfileId?: string;
+}
+
 export interface AppProps {
   services: IServiceAccessor;
   baseFeedbackService: IFeedbackService;
-  onConnectRemote: (options: RemoteTarget, requestId?: string) => Promise<string>;
+  onConnectRemote: (
+    options: RemoteTarget,
+    requestId?: string,
+    context?: RemoteConnectionContext,
+  ) => Promise<string>;
   onSelectRemoteProject: (
     sessionId: string,
     path: string,
     localWorkspacePath?: string,
+    preparedWorkspaceIdentity?: string,
+    isCurrent?: () => boolean | Promise<boolean>,
+    /** 取代默认草稿激活，在原 bind/port-ready 导航提交点同步执行。 */
+    onWorkspaceActivated?: () => void,
   ) => Promise<void>;
   onCancelRemoteProject: (sessionId: string) => Promise<void>;
   onReconnectRemoteWorkspace: (workspaceKey: string) => Promise<void>;
@@ -91,6 +159,7 @@ export interface AppProps {
   onLogin?: () => void;
   user?: UserInfo | null;
   reconnectingRemoteWorkspaceKeys: string[];
+  remoteWorkspaceRecoveryByWorkspaceKey?: Record<string, RemoteWorkspaceRecoveryStatus>;
   remoteWorkspaceErrorByWorkspaceKey: Record<string, string>;
   reconnectingRemoteWorkspaceLogsByWorkspaceKey?: Record<string, RemoteConnectionLogEntry[]>;
   remoteConnectionLogs?: RemoteConnectionLogEntry[];
@@ -99,7 +168,7 @@ export interface AppProps {
   onResolveConversationWorkspace?: () => Promise<string>;
   onOpenWorkspace: () => void;
   onOpenFolderFromWorkspaceMenu: () => void;
-  onOpenRemoteWorkspace?: () => void;
+  onOpenRemoteWorkspace?: (preference?: RemoteConnectionOpenPreference) => void | boolean;
   onCreateScratchWorkspace: (name: string) => Promise<string | null>;
   remoteConnectionInProgress?: boolean;
   onReturnToWorkspace?: () => void;
@@ -160,6 +229,8 @@ export interface WorkspaceShellLayoutProps extends Omit<AppProps, "baseFeedbackS
   goBackShortcutLabel: string;
   goForwardShortcutLabel: string;
   toggleSidePaneShortcutLabel: string;
+  /** 「进入 / 退出完整视图」快捷键标签（仅桌面）。 */
+  toggleSidePaneFullViewShortcutLabel?: string;
   canGoBack: boolean;
   canGoForward: boolean;
   canTaskNavBack: boolean;
@@ -170,6 +241,8 @@ export interface WorkspaceShellLayoutProps extends Omit<AppProps, "baseFeedbackS
   supportsEmbeddedBrowser: boolean;
   isGitOpen: boolean;
   isSidePaneOpen: boolean;
+  /** Side Pane 完整视图控制器（仅桌面；spec：docs/ui/side-pane-full-view.md）。 */
+  sidePaneFullView?: SidePaneFullViewController;
   summaryPanelVariantOverride: ChatViewSummaryPanelVariant | null;
   onSummaryPanelVariantOverrideChange: (variant: ChatViewSummaryPanelVariant | null) => void;
   sidePaneState: WorkspaceSidePaneState | null;

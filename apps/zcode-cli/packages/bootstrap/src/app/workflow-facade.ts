@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createNodeContextSourceAdapter } from "@zcode/adapters/context";
 import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
@@ -286,6 +287,8 @@ function createWorkflowChildRuntime(
       // workflow child 不在 Guarded 合同内；只隔离父任务模式，不继承审批。
       mode: "yolo",
       modelSelection: deps.runtime.getSessionModelSelection(),
+      // 父 Shell 在首条输入才解析，不能继承 app 创建时尚未初始化的静态配置。
+      bashShellSelection: deps.runtime.getSessionShellSelection(),
       parentSessionId: deps.sessionId,
       taskType: "workflow_child",
       workingDirectory: deps.workingDirectory,
@@ -304,6 +307,7 @@ function createWorkflowChildRuntime(
             caCertFile: deps.configResult.config.network.caCertFile,
           },
           outputRootDir: join(deps.storageRoot, "cli", "exec"),
+          bashOutputTempDir: tmpdir(),
           processEnv: deps.appOptions.env ?? process.env,
         }),
       fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
@@ -326,6 +330,8 @@ function createWorkflowChildRuntime(
         deps.configResult.config.features.skill && deps.configResult.config.skills.enabled
           ? (deps.appOptions.skillPort ??
             createNodeSkillAdapter({
+              // 与主实例共用目录范围，保留附加 root 的限定技能来源。
+              additionalDirectories: deps.appOptions.additionalDirectories,
               extraRoots: deps.configResult.config.skills.roots,
               // workflow 子 agent 复用同一套 skill 发现逻辑，也必须继承主配置里的禁用路径。
               disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),

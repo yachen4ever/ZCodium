@@ -3,6 +3,10 @@ import {
   v4BackgroundBashOutputParamsSchema,
   type BackgroundBashOutputResult,
 } from "@zcode/shared/zcode-protocol-v4";
+import {
+  pluginUiToolResultNotificationSchema,
+  type PluginUiToolResultNotification,
+} from "@zcode/shared/mcp-apps";
 // V4 conversation 网关（host 通道层 CLI 侧）。
 // 职责：per-session ConversationTopicPublisher 注册表 + flushWindowMs 定时调度
 // + v4/command → CommandInbox → 宿主 executor 的收口。
@@ -44,6 +48,8 @@ import type {
   RoutedTopicFrame,
   RoutedTopicWireFrame,
   SessionSummary,
+  SessionsIndexReconcileParams,
+  SessionsIndexReconcileResult,
   SessionsIndexTopicFrame,
   SubscribeAck,
   V4AttachmentBeginResult,
@@ -83,6 +89,8 @@ import {
   measureTopicNotificationEnvelopeBytes,
   parseConversationTopic,
   parseSessionsIndexTopic,
+  sessionsIndexReconcileParamsSchema,
+  sessionsIndexReconcileResultSchema,
   parseWorkspaceConfigTopic,
   v4AttachmentAbortParamsSchema,
   v4AttachmentBeginParamsSchema,
@@ -142,7 +150,6 @@ import { SessionsIndexPublisher } from "./sessions-index-publisher.js";
 import { SessionsIndexPublisherRegistry } from "./sessions-index-publisher-registry.js";
 import { WorkspaceConfigPublisher } from "./workspace-config-publisher.js";
 import type { TopicFrameReservation } from "./topic-frame-reservation.js";
-import { ConversationTelemetryFactNormalizer } from "./conversation-telemetry-facts.js";
 import { CuaPermissionObservationNormalizer } from "./cua-permission-observation.js";
 import { V4CapabilityUnsupportedError } from "./commands/handlers/interaction-background.js";
 
@@ -217,7 +224,11 @@ export interface V4GatewayHost {
     sessionId: string,
     resumeThoughtLevel?: string,
     workspace?: ZCodeWorkspaceRef,
+    additionalDirectories?: string[],
+    persistedMessages?: MessageWithParts[],
   ): Promise<ColdSessionResumeOutcome>;
+  loadPersistedMessages?(sessionId: string): Promise<MessageWithParts[]>;
+  retainSessionRuntime?(sessionId: string): Promise<() => void>;
   /**
    * 下行物理帧出口（宿主负责投递：stdio notification / MessagePort / ws）。
    *
@@ -229,6 +240,8 @@ export interface V4GatewayHost {
   emitConversationTelemetryFact?(fact: ConversationTelemetryFact): void;
   /** 当前进程 live request_access 权限事实；不缓存、不进入 topic replay。 */
   emitCuaPermissionObservation?(observation: CuaPermissionObservation): void;
+  /** 成功 UI 工具结果的窗口副作用；与 conversation 订阅、历史 hydration 无关。 */
+  emitPluginUiToolResult?(result: PluginUiToolResultNotification): void;
   /**
    * sessions-index：会话 → 所属 workspaceId（列表 topic 的分桶键）。
    * 未实现（旧宿主）→ sessions-index 路径整体不激活（no-op），不影响 conversation。
@@ -275,6 +288,7 @@ export interface V4GatewayHost {
    * store 读取是异步的，故允许返回 Promise（gateway 订阅时 await；同步 stub 直接返回数组）。
    */
   getStoredSessionSummaries?(workspaceId: string): Promise<SessionSummary[]> | SessionSummary[];
+  reconcileSessions?(params: SessionsIndexReconcileParams): Promise<SessionsIndexReconcileResult>;
   /**
    * 3.3.6 远端历史兼容：用精确 task allowlist 幂等认领后返回严格 identity 摘要。
    * 非远端 workspace 返回 null；失败可降级为空数组，后续携带 allowlist 的订阅会重试。
@@ -489,7 +503,6 @@ interface ProjectionEventCommitWaiter {
 }
 
 const PROJECTION_EVENT_COMMIT_TIMEOUT_MS = 25_000;
-const MAX_TELEMETRY_EVENT_IDS = 2_000;
 /** detached subagent child 终态后无订阅者时，publisher 由低频 tick 释放前的保留时长。 */
 export const DETACHED_CHILD_PUBLISHER_GRACE_MS = 120_000;
 
@@ -629,9 +642,7 @@ export class ConversationV4Gateway {
   private readonly attachmentPruneTimer: ReturnType<typeof setInterval>;
   private readonly now: () => number;
   private readonly createLogEpoch: (sessionId: string) => string;
-  private readonly telemetryNormalizer = new ConversationTelemetryFactNormalizer();
   private readonly cuaPermissionNormalizer = new CuaPermissionObservationNormalizer();
-  private readonly telemetryEventIds = new Set<string>();
   private disposed = false;
 
   /** session entry 状态变更后的轻量 metadata 更新，不重放 conversation event。 */
@@ -769,34 +780,6 @@ export class ConversationV4Gateway {
   }
 
   private emitLiveTelemetryFact(sessionId: string, event: SessionEvent): void {
-    const eventId = String(event.id);
-    // 主 session 与 detached child 各自维护事件序列，eventId 不能假设跨
-    // session 全局唯一。旧去重只用 eventId，会把 child 的同号事件误判成主会话重放，
-    // 导致前台 Subagent 的真实轮次事实被静默丢弃。
-    const telemetryEventKey = `${sessionId}\0${eventId}`;
-    if (this.telemetryEventIds.has(telemetryEventKey)) return;
-    this.telemetryEventIds.add(telemetryEventKey);
-    if (this.telemetryEventIds.size > MAX_TELEMETRY_EVENT_IDS) {
-      const oldest = this.telemetryEventIds.values().next().value;
-      if (typeof oldest === "string") this.telemetryEventIds.delete(oldest);
-    }
-    try {
-      const config =
-        this.publishers.get(sessionId)?.getSnapshot().config ??
-        this.host.getSessionConfigSeed?.(sessionId) ??
-        undefined;
-      const fact = this.telemetryNormalizer.normalize(sessionId, event, {
-        memoryEnabled: this.host.getSessionMemoryEnabled?.(sessionId),
-        modelName: config?.model,
-        modelProvider: config?.provider,
-      });
-      if (fact) {
-        this.host.emitConversationTelemetryFact?.(fact);
-      }
-    } catch (error) {
-      // 轮次事实绝不能反向阻断 conversation 投影；严格 schema 失败只记录诊断。
-      this.host.onError?.("v4.telemetry.normalize", error);
-    }
     try {
       const observation = this.cuaPermissionNormalizer.normalize(sessionId, event);
       if (observation) this.host.emitCuaPermissionObservation?.(observation);
@@ -950,6 +933,30 @@ export class ConversationV4Gateway {
       return;
     }
     this.resolveProjectionEventCommit(sessionId, String(event.id));
+    // 后台会话没有工具卡/订阅，仍须在 live 投影提交后通知宿主创建 guest。
+    // 输入与 UI 描述只取同一会话的权威成功行；历史 hydration 不经过此入口。
+    if (event.type === SessionEventType.ToolCallResult && this.host.emitPluginUiToolResult) {
+      const toolCallId = (event.payload as { toolCallId: string }).toolCallId;
+      const row = publisher
+        .getSnapshot()
+        .rows.window.find((row) => row.kind === "toolCall" && row.toolCallId === toolCallId);
+      if (
+        row?.kind === "toolCall" &&
+        row.status === "success" &&
+        row.display?.kind === "mcp_tool"
+      ) {
+        const result = pluginUiToolResultNotificationSchema.safeParse({
+          sessionId,
+          toolCallId,
+          serverName: row.display.serverName,
+          ui: row.display.ui,
+          ...(row.input && typeof row.input === "object" && !Array.isArray(row.input)
+            ? { input: row.input }
+            : {}),
+        });
+        if (result.success) this.host.emitPluginUiToolResult(result.data);
+      }
+    }
     if (
       !this.hydrationBuffers.has(sessionId) &&
       (event.type === SessionEventType.TurnComplete || event.type === SessionEventType.TurnError)
@@ -1176,6 +1183,12 @@ export class ConversationV4Gateway {
     const dispatch = await this.subscribeSessionsIndexReserved(rawParams);
     dispatch.commit();
     return dispatch;
+  }
+
+  async reconcileSessions(rawParams: unknown): Promise<SessionsIndexReconcileResult> {
+    const params = sessionsIndexReconcileParamsSchema.parse(rawParams);
+    if (!this.host.reconcileSessions) throw new Error("sessionsIndex/reconcile is unavailable");
+    return sessionsIndexReconcileResultSchema.parse(await this.host.reconcileSessions(params));
   }
 
   async subscribeSessionsIndexReserved(
@@ -1410,6 +1423,7 @@ export class ConversationV4Gateway {
             sessionId,
             params.resumeThoughtLevel,
             params.workspace,
+            params.additionalDirectories,
           )
         : await this.hydratePublisher(sessionId);
     const cliSessionRestoreMs = !isLiveConversation
@@ -2680,10 +2694,10 @@ export class ConversationV4Gateway {
 
   /** 会话关闭：清 publisher 与其全部订阅调度；hydration 标记同清（重开走冷启动重建）；
    *  并从其 workspace index 移除该会话（session.removed 推给列表订阅者）。 */
-  disposeSession(sessionId: string): void {
+  disposeSession(sessionId: string, options: { deleted?: boolean } = {}): void {
     this.cleanupSessionRuntime(sessionId, {
       clearCommandInbox: false,
-      notifyIndexRemoved: true,
+      notifyIndexRemoved: options.deleted === true,
     });
   }
 
@@ -2777,7 +2791,6 @@ export class ConversationV4Gateway {
     this.readyFlights.delete(sessionId);
     this.rawSequenceStates.delete(sessionId);
     if (options.clearCommandInbox) this.inbox.clearSession(sessionId);
-    this.telemetryNormalizer.clearSession(sessionId);
     this.detachedLiveSessions.delete(sessionId);
     this.projectionFaultedSessions.delete(sessionId);
     // detached child 归属清理：自己作为 child 从父表摘除；作为父则连带释放没有 record 的 child。
@@ -2827,7 +2840,6 @@ export class ConversationV4Gateway {
     this.hydrationInFlight.clear();
     this.readyFlights.clear();
     this.rawSequenceStates.clear();
-    this.telemetryEventIds.clear();
     this.detachedLiveSessions.clear();
     this.detachedChildParent.clear();
     this.detachedChildrenByParent.clear();
@@ -2896,6 +2908,7 @@ export class ConversationV4Gateway {
     sessionId: string,
     resumeThoughtLevel?: string,
     workspace?: ZCodeWorkspaceRef,
+    additionalDirectories?: string[],
   ): Promise<ConversationTopicPublisher> {
     const existingFlight = this.readyFlights.get(sessionId);
     if (existingFlight) return existingFlight;
@@ -2905,6 +2918,8 @@ export class ConversationV4Gateway {
         sessionId,
         resumeThoughtLevel,
         workspace,
+        // 宿主签名第四参是目录、第五参才是正文快照；遗漏会使冷恢复退化成仅 cwd。
+        additionalDirectories,
       );
       return this.hydratePublisher(sessionId, persistedMessages);
     });

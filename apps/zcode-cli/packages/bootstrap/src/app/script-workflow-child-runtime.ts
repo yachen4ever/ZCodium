@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createNodeContextSourceAdapter } from "@zcode/adapters/context";
 import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
@@ -143,6 +144,8 @@ export function createScriptWorkflowAgentRuntime(input: {
       // 「Permissions inside a run」）。
       mode: "yolo",
       modelSelection,
+      // 父 Shell 在首条输入才解析，子会话须继承已初始化的会话快照。
+      bashShellSelection: input.deps.runtime.getSessionShellSelection(),
       parentSessionId: input.deps.sessionId,
       subagents: { enabled: false },
       taskType: "workflow_child",
@@ -184,9 +187,7 @@ export function createScriptWorkflowAgentRuntime(input: {
       ...(input.workflowSubmitPort && input.workflowSubmitSchema
         ? { workflowSubmitSchema: input.workflowSubmitSchema }
         : {}),
-      ...(input.workflowEscalatePort
-        ? { workflowEscalatePort: input.workflowEscalatePort }
-        : {}),
+      ...(input.workflowEscalatePort ? { workflowEscalatePort: input.workflowEscalatePort } : {}),
       ...(input.modelRequestAdmission
         ? { modelRequestAdmission: input.modelRequestAdmission }
         : {}),
@@ -244,6 +245,7 @@ function createRuntimeDeps(
           caCertFile: deps.configResult.config.network.caCertFile,
         },
         outputRootDir: join(deps.storageRoot, "cli", "exec"),
+        bashOutputTempDir: tmpdir(),
         processEnv: deps.appOptions.env ?? process.env,
       }),
     fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
@@ -287,6 +289,8 @@ export function createWorkflowChildSkillPort(
   return (
     deps.appOptions.skillPort ??
     createNodeSkillAdapter({
+      // child 自建 adapter 时也必须继承父实例目录，不能只继承 prompt 中的目录提示。
+      additionalDirectories: deps.appOptions.additionalDirectories,
       extraRoots: deps.configResult.config.skills.roots,
       extraResolvedRoots: [...deps.pluginSkillRoots],
       // 脚本 workflow child runtime 不能绕过用户禁用的 SKILL.md 路径。

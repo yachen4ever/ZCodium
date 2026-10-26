@@ -8,6 +8,7 @@ import {
   HostMessageTypes,
   HostResponseTypes,
   hostResponseMessageSchema,
+  scopedServicePortPayloadSchema,
   InternalChannels,
   PlatformChannels,
   resolveWorkspaceKey,
@@ -15,6 +16,11 @@ import {
   type ProviderProvisioningTrigger,
   type WindowHostRemoteWorkspaceDescriptor,
   type WebRemoteControlFailure,
+  type RemoteConnectionContext,
+  type BindRemoteWorkspaceSessionContextResult,
+  type HostProjectWorkspaceNavigationInput,
+  type HostPreparedProjectWorkspace,
+  hostPrepareProjectWorkspaceMessageSchema,
 } from "@zcode/shared";
 import type { RemoteAssetDirs } from "./desktopRuntimeEnv.js";
 import { ProviderProvisioningEnvironmentCoordinator } from "./providerProvisioningEnvironmentCoordinator.js";
@@ -47,6 +53,9 @@ interface RemoteAttachmentRoute {
   };
   attachmentState: "attachable" | "closed";
   providerProvisioningDispose?: () => void;
+  providerProvisioningReady?: Promise<void>;
+  /** 手机 prepare 只登记可 bridge 的 scope，不隐式创建桌面 continuous 订阅。 */
+  consumer?: "desktop" | "mobile";
 }
 
 interface PendingProviderProvisioningExecution {
@@ -133,6 +142,56 @@ export function createRemoteWorkspaceSessionManager(options: {
   providerProvisioningCoordinator?: ProviderProvisioningEnvironmentCoordinator;
 }) {
   const pendingByRequestKey = new Map<string, PendingConnect>();
+  const pendingProjectNavigations = new Map<
+    string,
+    {
+      child: ElectronUtilityProcess;
+      win: BrowserWindow;
+      webContentsId: number;
+      requestId: string;
+      resolve(value: HostPreparedProjectWorkspace): void;
+      reject(error: Error): void;
+    }
+  >();
+  // Main 只关联 Host bind 请求；canonical scope 和绑定准备状态仍由 Host 权威提供。
+  const pendingBinds = new Map<
+    string,
+    {
+      child: ElectronUtilityProcess;
+      webContentsId: number;
+      sessionId: string;
+      resolve: (value: {
+        descriptor: WindowHostRemoteWorkspaceDescriptor;
+        previousWorkspaceIdentity?: string;
+      }) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  function cancelBinds(
+    predicate: (entry: {
+      child: ElectronUtilityProcess;
+      webContentsId: number;
+      sessionId: string;
+    }) => boolean,
+    message: string,
+  ) {
+    for (const [id, entry] of pendingBinds) {
+      if (!predicate(entry)) continue;
+      pendingBinds.delete(id);
+      clearTimeout(entry.timer);
+      try {
+        entry.child.postMessage({
+          type: HostMessageTypes.CancelRemoteWorkspaceBind,
+          requestId: id,
+        });
+      } catch {
+        /* Host 已退出仍须收口本机 promise。 */
+      }
+      entry.reject(new Error(message));
+    }
+  }
   const routesBySessionId = new Map<string, RemoteAttachmentRoute>();
   const listenedHosts = new WeakSet<ElectronUtilityProcess>();
   const reconnectsByWorkspaceKey = new Map<string, Promise<string>>();
@@ -282,11 +341,17 @@ export function createRemoteWorkspaceSessionManager(options: {
         );
         win.webContents.postMessage(
           InternalChannels.ScopedServicePort,
-          {
+          // #68：只传 legacy target 会被新版 Preload 严格 schema 拒绝，15 秒 ready 超时
+          // 只是结果。补齐 Host 权威 scope，不放松校验、不延长超时。
+          scopedServicePortPayloadSchema.parse({
             attachmentId,
             sessionId: descriptor.remoteSessionId,
             target: descriptor.target,
-          },
+            sourceServerId: descriptor.sourceServerId,
+            workspacePath: descriptor.workspacePath,
+            workspaceIdentity: descriptor.workspaceIdentity,
+            workspacePurpose: descriptor.workspacePurpose,
+          }),
           [port1],
         );
       } catch (error) {
@@ -370,6 +435,7 @@ export function createRemoteWorkspaceSessionManager(options: {
         executeProviderProvisioning(child, descriptor.remoteSessionId, environmentKey, trigger),
     );
     route.providerProvisioningDispose = registration.dispose;
+    route.providerProvisioningReady = registration.initialSync;
     void registration.initialSync
       .then(() => attachRendererPort(pending.win, route, "connect"))
       .then(() => {
@@ -511,6 +577,95 @@ export function createRemoteWorkspaceSessionManager(options: {
     child.on("message", (message: unknown) => {
       const parsed = hostResponseMessageSchema.safeParse(message);
       if (!parsed.success) return;
+      if (parsed.data.type === HostResponseTypes.ProjectWorkspacePrepared) {
+        const key = requestKey(webContentsId, parsed.data.requestId);
+        const pending = pendingProjectNavigations.get(key);
+        if (!pending || pending.child !== child) return;
+        const result = parsed.data.result;
+        const assertCurrent = () => {
+          if (
+            pendingProjectNavigations.get(key) !== pending ||
+            appShutdownStarted ||
+            pending.win.isDestroyed() ||
+            pending.win.webContents.isDestroyed() ||
+            options.windowHostProcessMap.get(webContentsId) !== child
+          )
+            throw new Error("窗口或 Host 已换代，项目导航已取消");
+        };
+        void (async () => {
+          assertCurrent();
+          if (!result.ok) throw new Error(result.error);
+          const value = result.value;
+          if (value.remote) {
+            const descriptor = value.remote;
+            if (
+              descriptor.workspacePath !== value.workspacePath ||
+              descriptor.workspaceIdentity !== value.workspaceIdentity
+            )
+              throw new Error("Host prepared project scope does not match descriptor");
+            let route = routesBySessionId.get(descriptor.remoteSessionId);
+            if (
+              route &&
+              (route.webContentsId !== webContentsId ||
+                route.descriptor.workspaceIdentity !== descriptor.workspaceIdentity ||
+                route.descriptor.workspacePath !== descriptor.workspacePath ||
+                (route.attachmentState === "attachable" &&
+                  route.descriptor.generation !== descriptor.generation))
+            )
+              throw new Error("Remote project scope belongs to a different window or identity");
+            if (!route || route.attachmentState === "closed") {
+              route = {
+                webContentsId,
+                descriptor,
+                attachmentState: "attachable",
+                consumer: "mobile",
+              };
+              const registration = providerProvisioningCoordinator.register(
+                buildRemoteEnvironmentKey(descriptor.target),
+                descriptor.remoteSessionId,
+                (trigger) =>
+                  executeProviderProvisioning(
+                    child,
+                    descriptor.remoteSessionId,
+                    buildRemoteEnvironmentKey(descriptor.target),
+                    trigger,
+                  ),
+              );
+              route.providerProvisioningDispose = registration.dispose;
+              route.providerProvisioningReady = registration.initialSync;
+              routesBySessionId.set(descriptor.remoteSessionId, route);
+            }
+            // 同一 scope 的并发准备加入既有 readiness；不启动第二份 Provider 同步或 runtime。
+            try {
+              await route.providerProvisioningReady;
+            } catch (error) {
+              // 首次配置失败不能留下带 rejected readiness 的永久 scope；显式重试仍归原 coordinator。
+              if (
+                route.consumer === "mobile" &&
+                routesBySessionId.get(descriptor.remoteSessionId) === route
+              ) {
+                routesBySessionId.delete(descriptor.remoteSessionId);
+                route.providerProvisioningDispose?.();
+              }
+              throw error;
+            }
+            assertCurrent();
+            if (
+              routesBySessionId.get(descriptor.remoteSessionId) !== route ||
+              route.attachmentState !== "attachable"
+            )
+              throw new Error("Remote project scope changed during preparation");
+          }
+          assertCurrent();
+          pendingProjectNavigations.delete(key);
+          pending.resolve(value);
+        })().catch((error: unknown) => {
+          if (pendingProjectNavigations.get(key) !== pending) return;
+          pendingProjectNavigations.delete(key);
+          pending.reject(error instanceof Error ? error : new Error(String(error)));
+        });
+        return;
+      }
       if (parsed.data.type === HostResponseTypes.RemoteWorkspaceConnectionLog) {
         const pending = pendingByRequestKey.get(requestKey(webContentsId, parsed.data.requestId));
         if (!pending) return;
@@ -565,6 +720,36 @@ export function createRemoteWorkspaceSessionManager(options: {
         handleConnected(child, webContentsId, parsed.data.requestId, parsed.data.descriptor);
         return;
       }
+      if (
+        parsed.data.type === HostResponseTypes.RemoteWorkspaceContextBound ||
+        parsed.data.type === HostResponseTypes.RemoteWorkspaceContextBindFailed
+      ) {
+        const pending = pendingBinds.get(parsed.data.requestId);
+        if (!pending || pending.child !== child || pending.webContentsId !== webContentsId) return;
+        pendingBinds.delete(parsed.data.requestId);
+        clearTimeout(pending.timer);
+        if (parsed.data.type === HostResponseTypes.RemoteWorkspaceContextBindFailed) {
+          pending.reject(
+            Object.assign(new Error(parsed.data.error), {
+              code: parsed.data.reasonCode,
+              retryable: parsed.data.retryable,
+            }),
+          );
+        } else if (
+          !parsed.data.descriptor ||
+          parsed.data.descriptor.remoteSessionId !== pending.sessionId
+        ) {
+          pending.reject(
+            new Error("Host bind ACK is missing its authoritative workspace descriptor"),
+          );
+        } else {
+          pending.resolve({
+            descriptor: parsed.data.descriptor,
+            previousWorkspaceIdentity: parsed.data.previousWorkspaceIdentity,
+          });
+        }
+        return;
+      }
       if (parsed.data.type === HostResponseTypes.RemoteWorkspaceConnectFailed) {
         const key = requestKey(webContentsId, parsed.data.requestId);
         const pending = pendingByRequestKey.get(key);
@@ -575,7 +760,13 @@ export function createRemoteWorkspaceSessionManager(options: {
           level: "error",
           message: parsed.data.error,
         });
-        pending.reject(new Error(parsed.data.error));
+        // #68：R3 的安装等待原因已通过严格 Host schema 校验，薄转发不能把它压成裸字符串。
+        pending.reject(
+          Object.assign(new Error(parsed.data.error), {
+            code: parsed.data.reasonCode,
+            retryable: parsed.data.retryable,
+          }),
+        );
         return;
       }
       if (parsed.data.type === HostResponseTypes.RemoteWorkspaceClosed) {
@@ -583,7 +774,13 @@ export function createRemoteWorkspaceSessionManager(options: {
       }
     });
     child.once("exit", () => {
+      cancelBinds((entry) => entry.child === child, "窗口 Local Host 已退出");
       const error = new Error("窗口 Local Host 已退出");
+      for (const [key, pending] of pendingProjectNavigations) {
+        if (pending.child !== child) continue;
+        pendingProjectNavigations.delete(key);
+        pending.reject(error);
+      }
       for (const [requestId, pendingExecution] of pendingProviderProvisioningExecutions) {
         if (pendingExecution.child !== child) continue;
         pendingProviderProvisioningExecutions.delete(requestId);
@@ -611,7 +808,7 @@ export function createRemoteWorkspaceSessionManager(options: {
     win: BrowserWindow,
     target: RemoteTarget,
     requestId?: string,
-    context?: RemoteWorkspaceSessionContext,
+    context?: RemoteConnectionContext,
   ): Promise<string> {
     if (appShutdownStarted) {
       throw new Error("应用正在退出，无法创建远程工作区连接");
@@ -654,6 +851,9 @@ export function createRemoteWorkspaceSessionManager(options: {
         remoteAssets: options.resolveRemoteAssetDirs(),
         ...(context?.workspacePath ? { workspacePath: context.workspacePath } : {}),
         ...(context?.workspaceIdentity ? { workspaceIdentity: context.workspaceIdentity } : {}),
+        ...(context?.confirmSourceServerInstall === true
+          ? { confirmSourceServerInstall: true }
+          : {}),
       });
     });
   }
@@ -662,13 +862,13 @@ export function createRemoteWorkspaceSessionManager(options: {
     sessionId: string,
     context: RemoteWorkspaceSessionContext,
     expectedWebContentsId?: number,
-  ): Promise<void> {
+  ): Promise<BindRemoteWorkspaceSessionContextResult> {
     const route = routesBySessionId.get(sessionId);
     if (!route) {
       if (expectedWebContentsId != null) {
         throw new Error(`未找到远程 workspace session，sessionId=${sessionId}`);
       }
-      return;
+      throw new Error(`未找到远程 workspace session，sessionId=${sessionId}`);
     }
     if (expectedWebContentsId != null && route.webContentsId !== expectedWebContentsId) {
       throw new Error(`远程 workspace session 不属于当前窗口，sessionId=${sessionId}`);
@@ -683,26 +883,69 @@ export function createRemoteWorkspaceSessionManager(options: {
     if (!child || !win) {
       throw new Error(`未找到远程 workspace 所属窗口 Host，sessionId=${sessionId}`);
     }
-    child.postMessage({
-      type: HostMessageTypes.BindRemoteWorkspaceContext,
-      requestId: randomUUID(),
-      remoteSessionId: sessionId,
-      workspacePath: context.workspacePath,
-      workspaceIdentity,
+    cancelBinds((entry) => entry.sessionId === sessionId, "远程 workspace bind 已被后续请求替代");
+    const requestId = randomUUID();
+    const bound = await new Promise<{
+      descriptor: WindowHostRemoteWorkspaceDescriptor;
+      previousWorkspaceIdentity?: string;
+    }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const timedOut = pendingBinds.get(requestId);
+        if (timedOut) cancelBinds((entry) => entry === timedOut, "Host workspace bind ACK timeout");
+      }, options.rendererAttachmentReadyTimeoutMs ?? 15_000);
+      timer.unref?.();
+      pendingBinds.set(requestId, {
+        child,
+        webContentsId: route.webContentsId,
+        sessionId,
+        resolve,
+        reject,
+        timer,
+      });
+      try {
+        child.postMessage({
+          type: HostMessageTypes.BindRemoteWorkspaceContext,
+          requestId,
+          remoteSessionId: sessionId,
+          workspacePath: context.workspacePath,
+          workspaceIdentity,
+        });
+      } catch (error) {
+        pendingBinds.delete(requestId);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
-    route.descriptor = {
-      ...route.descriptor,
-      workspacePath: context.workspacePath,
-      workspaceIdentity,
-      generation: route.descriptor.generation + 1,
-    };
-    // 同一 parentPort 上 Bind 先于 Attach 处理；IPC 只在 renderer 注册新 port 后返回。
+    // #68：parentPort 消息有序不代表异步 bind 已完成。只使用 Host ACK 的 canonical scope，
+    // 不能先发代理 port、收到 renderer ready 就把仍在准备的 workspace 当成可用。
+    if (
+      routesBySessionId.get(sessionId) !== route ||
+      options.windowHostProcessMap.get(route.webContentsId) !== child
+    )
+      throw new Error("Remote workspace bind owner changed");
+    route.descriptor = bound.descriptor;
     await attachRendererPort(win, route, "workspace-context-bound");
+    if (!route.descriptor.workspacePath || !route.descriptor.workspaceIdentity)
+      throw new Error("Bound remote workspace scope is incomplete");
+    return {
+      sourceServerId: route.descriptor.sourceServerId,
+      remoteSessionId: sessionId,
+      workspacePath: route.descriptor.workspacePath,
+      workspaceIdentity: route.descriptor.workspaceIdentity,
+      workspacePurpose: route.descriptor.workspacePurpose,
+      ...(bound.previousWorkspaceIdentity
+        ? { previousWorkspaceIdentity: bound.previousWorkspaceIdentity }
+        : {}),
+    };
   }
 
   function reattachRemoteWorkspaceSessionsForWindow(win: BrowserWindow, reason: string): void {
     for (const route of routesBySessionId.values()) {
-      if (route.webContentsId === win.webContents.id && route.attachmentState === "attachable") {
+      if (
+        route.webContentsId === win.webContents.id &&
+        route.attachmentState === "attachable" &&
+        route.consumer !== "mobile"
+      ) {
         void attachRendererPort(win, route, reason).catch((error: unknown) => {
           options.logger.warn("[window-host-remote] renderer reattach failed", {
             sessionId: route.descriptor.remoteSessionId,
@@ -715,6 +958,7 @@ export function createRemoteWorkspaceSessionManager(options: {
   }
 
   function disposeRemoteWorkspaceSession(sessionId: string, _reason?: string): void {
+    cancelBinds((entry) => entry.sessionId === sessionId, "远程 workspace session 已释放");
     const route = routesBySessionId.get(sessionId);
     if (!route) return;
     routesBySessionId.delete(sessionId);
@@ -742,6 +986,12 @@ export function createRemoteWorkspaceSessionManager(options: {
   }
 
   function disposeRemoteWorkspaceSessionsForWindow(webContentsId: number): void {
+    for (const [key, pending] of pendingProjectNavigations) {
+      if (pending.webContentsId !== webContentsId) continue;
+      pendingProjectNavigations.delete(key);
+      pending.reject(new Error("窗口已关闭，项目导航已取消"));
+    }
+    cancelBinds((entry) => entry.webContentsId === webContentsId, "窗口已关闭，远程绑定已取消");
     for (const [sessionId, route] of Array.from(routesBySessionId)) {
       if (route.webContentsId !== webContentsId) continue;
       routesBySessionId.delete(sessionId);
@@ -765,6 +1015,16 @@ export function createRemoteWorkspaceSessionManager(options: {
   ): void {
     const child = options.windowHostProcessMap.get(webContentsId);
     if (!child) return;
+    for (const [key, pending] of pendingProjectNavigations) {
+      if (pending.webContentsId !== webContentsId || (requestId && pending.requestId !== requestId))
+        continue;
+      pendingProjectNavigations.delete(key);
+      pending.reject(new Error("项目导航已取消"));
+      child.postMessage({
+        type: HostMessageTypes.CancelRemoteWorkspaceConnect,
+        requestId: pending.requestId,
+      });
+    }
     for (const pending of pendingByRequestKey.values()) {
       if (
         pending.webContentsId === webContentsId &&
@@ -916,7 +1176,44 @@ export function createRemoteWorkspaceSessionManager(options: {
     }).port;
   }
 
+  function prepareProjectWorkspace(
+    win: BrowserWindow,
+    request: HostProjectWorkspaceNavigationInput,
+    requestId = randomUUID(),
+  ): Promise<HostPreparedProjectWorkspace> {
+    if (appShutdownStarted || win.isDestroyed() || win.webContents.isDestroyed())
+      return Promise.reject(new Error("窗口已关闭，项目导航已取消"));
+    const child = getWindowHost(win);
+    const key = requestKey(win.webContents.id, requestId);
+    if (pendingProjectNavigations.has(key))
+      return Promise.reject(new Error("项目导航 requestId 重复"));
+    return new Promise((resolve, reject) => {
+      pendingProjectNavigations.set(key, {
+        child,
+        win,
+        webContentsId: win.webContents.id,
+        requestId,
+        resolve,
+        reject,
+      });
+      try {
+        child.postMessage(
+          hostPrepareProjectWorkspaceMessageSchema.parse({
+            type: HostMessageTypes.PrepareProjectWorkspace,
+            requestId,
+            ...request,
+            clientMode: "web-remote-replayable",
+          }),
+        );
+      } catch (error) {
+        pendingProjectNavigations.delete(key);
+        reject(error);
+      }
+    });
+  }
+
   return {
+    prepareProjectWorkspace,
     createRemoteWorkspaceSession,
     attachRemoteWorkspaceSessionHost,
     reconnectBotRemoteWorkspaceSession,
@@ -929,7 +1226,10 @@ export function createRemoteWorkspaceSessionManager(options: {
     disposeRemoteWorkspaceSessionsForWindow,
     disposeAllAndWaitForAppShutdown: async (_reason: string) => {
       appShutdownStarted = true;
+      cancelBinds(() => true, "应用正在退出，远程绑定已取消");
       const error = new Error("应用正在退出，远程连接已取消");
+      for (const pending of pendingProjectNavigations.values()) pending.reject(error);
+      pendingProjectNavigations.clear();
       for (const pending of pendingByRequestKey.values()) pending.reject(error);
       pendingByRequestKey.clear();
       for (const [sessionId, route] of Array.from(routesBySessionId)) {

@@ -56,6 +56,8 @@ interface TaskListItemProps {
   remoteSessionId?: string;
   task: ZCodeTaskMeta;
   isPinned: boolean;
+  isArchived?: boolean;
+  hoverEnabled?: boolean;
   isActive: boolean;
   isMobileActive?: boolean;
   onSelectTask: (taskId: string) => void;
@@ -127,7 +129,9 @@ function areTaskListItemPropsEqual(left: TaskListItemProps, right: TaskListItemP
     left.onArchiveTask === right.onArchiveTask &&
     left.onMarkTaskAsUnread === right.onMarkTaskAsUnread &&
     left.onOpenTaskContextMenu === right.onOpenTaskContextMenu &&
-    left.onOpenFileTree === right.onOpenFileTree
+    left.onOpenFileTree === right.onOpenFileTree &&
+    left.isArchived === right.isArchived &&
+    left.hoverEnabled === right.hoverEnabled
   );
 }
 
@@ -136,6 +140,8 @@ export const MemoTaskItem = memo(function TaskListItem({
   remoteSessionId,
   task,
   isPinned,
+  isArchived = false,
+  hoverEnabled = true,
   isActive,
   isMobileActive = false,
   onSelectTask,
@@ -355,7 +361,8 @@ export const MemoTaskItem = memo(function TaskListItem({
   // 手机远控标记和置顶状态共用左侧 leading 槽。
   // 已置顶任务如果继续常显 Pin，会和绝对定位的手机图标重叠；手机激活态默认让手机图标优先，hover 时再显示 Pin 操作。
   const showPinnedState = isPinned && leadingIndicator === "none" && !isMobileActive;
-  const shouldMountWorkspaceTaskActions = hoverActionsVisible || focusActionsVisible || isHoverNone;
+  const shouldMountWorkspaceTaskActions =
+    (hoverEnabled && (hoverActionsVisible || focusActionsVisible)) || isHoverNone;
   // hover:none 只代表触屏端需要常驻 action，不代表应永久隐藏时间、状态和变更摘要。
   // 元信息仅在真实 hover / focus 交互时让位，保持旧触屏布局的“元信息 + action”语义。
   const shouldSuppressWorkspaceTaskMetadata = hoverActionsVisible || focusActionsVisible;
@@ -363,7 +370,11 @@ export const MemoTaskItem = memo(function TaskListItem({
   const taskChangeSummary = getTaskChangeSummary(task);
   const isRemoteTask = Boolean(task.workspaceIdentity?.trim());
   const archiveLabel = intl.formatMessage({
-    id: isArchiveConfirming ? "common.confirm" : "taskList.archive",
+    id: isArchiveConfirming
+      ? "common.confirm"
+      : isArchived
+        ? "taskList.unarchive"
+        : "taskList.archive",
   });
   const taskTitleWithChanges = formatTaskTitleWithChanges(taskTitle, taskChangeSummary, intl);
   const workspaceLabel = getPathLeaf(task.workspacePath);
@@ -505,9 +516,9 @@ export const MemoTaskItem = memo(function TaskListItem({
       draggable={canDragToWorkbench}
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
-      onFocusCapture={() => setFocusActionsVisible(true)}
+      onMouseEnter={hoverEnabled ? handleMouseEnter : undefined}
+      onMouseLeave={hoverEnabled ? handleMouseLeave : undefined}
+      onFocusCapture={hoverEnabled ? () => setFocusActionsVisible(true) : undefined}
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
           setFocusActionsVisible(false);
@@ -531,7 +542,7 @@ export const MemoTaskItem = memo(function TaskListItem({
           : hasWorkflowRunLines
             ? "items-start"
             : "items-center",
-        isActive ? "bg-selected" : "hover:bg-surface-hover",
+        isActive ? "bg-selected" : hoverEnabled && "hover:bg-surface-hover",
       )}
     >
       {/* 之前任务列表依赖 divide-y 画分隔线，深色侧栏里每个 item 上下都会出现明显黑线，
@@ -768,6 +779,8 @@ export const MemoTaskItem = memo(function TaskListItem({
 MemoTaskItem.displayName = "MemoTaskItem";
 
 export function TaskListItemContextMenuContent({
+  organizationActions,
+  isArchived = false,
   workspacePath,
   remoteSessionId,
   task,
@@ -780,6 +793,8 @@ export function TaskListItemContextMenuContent({
   disableTaskActions = false,
   disabledReason,
 }: {
+  organizationActions?: React.ReactNode;
+  isArchived?: boolean;
   workspacePath: string;
   remoteSessionId?: string;
   task: ZCodeTaskMeta;
@@ -799,21 +814,6 @@ export function TaskListItemContextMenuContent({
   const workspaceActionsDisabledReason = workspaceActionsDisabled
     ? (disabledReason ?? intl.formatMessage({ id: "workspaceSidebar.unavailableLocalDirectory" }))
     : undefined;
-  // 收尾：「在分屏打开」仅桌面 shell（context 由 WorkspaceShellLayout 提供；
-  // 手机远控/无 Provider 环境默认 false → 菜单项整体不渲染）。
-  const splitPaneEntry = useV4SplitPaneEntry();
-  const splitPaneEntryEnabled = splitPaneEntry.enabled;
-  const splitPaneTarget = useMemo(
-    () => ({
-      workspacePath,
-      ...(task.workspaceIdentity?.trim() ? { workspaceIdentity: task.workspaceIdentity } : {}),
-      ...(remoteSessionId ? { remoteSessionId } : {}),
-      sessionId: task.taskId,
-    }),
-    [remoteSessionId, task.taskId, task.workspaceIdentity, workspacePath],
-  );
-  // 当前 focused session、已有 group 与 pane 上限统一由 shell owner 裁决；row 不再直接写 layout store。
-  const canOpenInSplitPane = splitPaneEntry.canOpenSession(splitPaneTarget);
   const openFeedbackSubmit = useFeedbackStore((state) => state.openSubmit);
   const {
     taskSessionFile,
@@ -878,6 +878,8 @@ export function TaskListItemContextMenuContent({
 
   return (
     <TaskListItemContextMenu
+      organizationActions={organizationActions}
+      isArchived={isArchived}
       intl={intl}
       isPinned={isPinned}
       fileManagerLabel={fileManagerLabel}
@@ -899,16 +901,6 @@ export function TaskListItemContextMenuContent({
       onMarkTaskAsUnread={() => {
         onMarkTaskAsUnread(task.taskId);
       }}
-      onOpenInSplitPane={
-        splitPaneEntryEnabled
-          ? () => {
-              // 旧入口直接写 paneLayout，绕过 active group 与 shell navigation，
-              // draft split 后下一次普通点击会把 session 灌进 primary。统一交给 shell controller。
-              splitPaneEntry.openSession(splitPaneTarget);
-            }
-          : undefined
-      }
-      openInSplitPaneDisabled={workspaceActionsDisabled || !canOpenInSplitPane}
       onOpenTaskFeedback={() => {
         void handleOpenTaskFeedback();
       }}

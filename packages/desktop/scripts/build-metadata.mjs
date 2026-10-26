@@ -84,9 +84,14 @@ export function collectBuildMetadata() {
   const desktopPackageJson = readJson(resolve(desktopDir, "package.json"));
 
   return {
-    // CI 发布时把完整 tag 版本（如 1.0.0-audit.20260922.6）通过 ZCODE_APP_VERSION 注入，
+    // CI 发布时把完整 tag 版本（如 1.17.1-audit.20261026）通过 ZCODE_APP_VERSION 注入，
     // 安装包文件名与应用版本都会带上审计序号；本地构建回退到 package.json 版本。
+    // 修复原因：2026-10 上游同步（06e0b728）删掉了这行注入，预发布构建的元数据仍写
+    // 基础版本，release 校验会报 "Metadata version mismatch"，产物名也缺少审计序号。
     appVersion: normalizeVersion(process.env.ZCODE_APP_VERSION?.trim() || rootPackageJson.version),
+    minCompatibleVersion: normalizeVersion(
+      rootPackageJson.zcodeCompatibility?.minCompatibleVersion ?? rootPackageJson.version,
+    ),
     buildCommitId: resolveCommitId(),
     buildTime: new Date().toISOString(),
     electronBuilderVersion: resolveInstalledPackageVersion(
@@ -102,7 +107,15 @@ export function readBuildMetadata() {
   }
 
   try {
-    return readJson(metadataPath);
+    const metadata = readJson(metadataPath);
+    return {
+      ...metadata,
+      minCompatibleVersion:
+        typeof metadata.minCompatibleVersion === "string" &&
+        metadata.minCompatibleVersion.length > 0
+          ? normalizeVersion(metadata.minCompatibleVersion)
+          : normalizeVersion(metadata.appVersion),
+    };
   } catch {
     return null;
   }

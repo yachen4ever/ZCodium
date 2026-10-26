@@ -1,6 +1,12 @@
 /* eslint-disable max-lines -- 远程连接向导的状态编排暂集中在同一组件，后续有独立拆分计划。 */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createUuid, type RemoteTarget, type RemoteWorkspaceSessionEntry } from "@zcode/shared";
+import {
+  createUuid,
+  SOURCE_SERVER_INSTALL_REQUIRED_ERROR_CODE,
+  type RemoteConnectionContext,
+  type RemoteTarget,
+  type RemoteWorkspaceSessionEntry,
+} from "@zcode/shared";
 import {
   TID_SSH_CONNECT_TRIGGER,
   TID_SSH_DIALOG,
@@ -42,9 +48,15 @@ import {
 import { useRemoteWorkspaceSessionStore } from "@/store/remoteWorkspaceSessionStore.js";
 import { useBaseWorkspaceServices } from "@/hooks/useWorkspaceServices.js";
 import type { VariantProps } from "class-variance-authority";
+import { buildRemoteConnectionProgress } from "@/remote-connection-flow/index.js";
+import { usePublishRemoteConnectionProgress } from "@/remote-connection-flow/ui/RemoteConnectionProgress.js";
 
 interface RemoteConnectionDialogProps {
-  onConnect: (options: RemoteTarget, requestId?: string) => Promise<string>;
+  onConnect: (
+    options: RemoteTarget,
+    requestId?: string,
+    context?: RemoteConnectionContext,
+  ) => Promise<string>;
   onSelectProject: (sessionId: string, path: string, localWorkspacePath?: string) => Promise<void>;
   onCancelSession: (sessionId: string) => Promise<void>;
   localWorkspacePath?: string;
@@ -271,6 +283,50 @@ export function RemoteConnectionDialog({
     closeDialog();
   }, [closeDialog, confirmRemoteFlowDiscard]);
 
+  const progressActionsRef = useRef({
+    resume: () => applyOpenState(true),
+    cancel: handleCloseRequest,
+  });
+  progressActionsRef.current = { resume: () => applyOpenState(true), cancel: handleCloseRequest };
+  const resumeProgress = useCallback(() => progressActionsRef.current.resume(), []);
+  const cancelProgress = useCallback(() => progressActionsRef.current.cancel(), []);
+  const progressSourceServerId = useRemoteWorkspaceSessionStore((state) =>
+    connectedSessionId ? state.sessionsById[connectedSessionId]?.sourceServerId : undefined,
+  );
+  const connectionProgress = useMemo(
+    () =>
+      buildRemoteConnectionProgress({
+        currentStep,
+        loading,
+        selectingDirectory,
+        open,
+        error,
+        connectedSessionId,
+        connectingRequestId,
+        pendingRemoteTarget,
+        connectionLogs,
+        sourceServerId: progressSourceServerId,
+        onResume: resumeProgress,
+        onCancel: cancelProgress,
+      }),
+    [
+      currentStep,
+      loading,
+      selectingDirectory,
+      open,
+      error,
+      connectedSessionId,
+      connectingRequestId,
+      pendingRemoteTarget,
+      connectionLogs,
+      progressSourceServerId,
+      resumeProgress,
+      cancelProgress,
+    ],
+  );
+  // 只发布脱敏展示；安装确认、离线资源、取消和目录 canonical bind 均继续由原路径处理。
+  usePublishRemoteConnectionProgress(connectionProgress);
+
   const startRemoteConnection = async (target: RemoteTarget) => {
     const nextTarget = withDefaultRemoteResourcePackages(target);
 
@@ -288,7 +344,32 @@ export function RemoteConnectionDialog({
     resetConnectionLogs();
     setCurrentStep("connecting");
     try {
-      const sessionId = await onConnect(nextTarget, requestId);
+      let sessionId: string;
+      try {
+        sessionId = await onConnect(nextTarget, requestId);
+      } catch (failure) {
+        // #68：R3 拒绝未经确认的新装是正确保护；旧向导丢弃该准入结果，导致导入后仍无法连接。
+        // 只对明确的 install-required 请求用户授权，不对普通错误或 upgrade/busy 重试。
+        if (
+          (failure as { code?: unknown } | null)?.code !== SOURCE_SERVER_INSTALL_REQUIRED_ERROR_CODE
+        )
+          throw failure;
+        const accepted = await confirmDialog({
+          title: intl.formatMessage({ id: "remote.runtime.confirmTitle" }),
+          description: intl.formatMessage({ id: "remote.runtime.confirmDescription" }),
+          confirmLabel: intl.formatMessage({ id: "remote.runtime.confirmInstall" }),
+          cancelLabel: intl.formatMessage({ id: "common.cancel" }),
+        });
+        if (!accepted) {
+          setCurrentStep("settings");
+          return;
+        }
+        const installRequestId = createUuid();
+        updateConnectingRequestId(installRequestId);
+        sessionId = await onConnect(nextTarget, installRequestId, {
+          confirmSourceServerInstall: true,
+        });
+      }
       const completionState = getRemoteConnectionCompletionDialogState("success");
       setConnectedSessionId(sessionId);
       setCurrentStep(completionState.step);
