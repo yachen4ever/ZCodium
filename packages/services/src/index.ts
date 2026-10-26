@@ -246,7 +246,7 @@ export { IFileWatcherService } from "./fileWatcher/fileWatcher.js";
 
 // OAuth service — IOAuthService is both a type (interface) and value (descriptor)
 export { IOAuthService } from "./oauth/oauth.js";
-export { IOrcaRouterService } from "./orcarouter/service.js";
+export { IOrcaRouterService } from "./orcarouter/contract.js";
 
 // UsageStats service — IUsageStatsService is both a type (interface) and value (descriptor)
 export { IUsageStatsService } from "./usage-stats/usageStats.js";
